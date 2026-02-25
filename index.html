@@ -42,7 +42,25 @@
     .stage{ padding-top: 56px; }
     iframe{ width:100%; height: calc(100vh - 56px); border:0; display:none; background:#fff; }
     iframe.show{ display:block; }
-  </style>
+  
+    .syncpill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:4px 10px;
+      border-radius:999px;
+      border:1px solid var(--navborder);
+      background: rgba(255,255,255,.06);
+      color: var(--navtext);
+      font-weight:800;
+      font-size:12px;
+      letter-spacing:.2px;
+      user-select:none;
+    }
+    .syncpill.ok{ border-color: rgba(34,197,94,.45); color: #d1fae5; }
+    .syncpill.bad{ border-color: rgba(239,68,68,.45); color: #fee2e2; }
+
+</style>
 
 <style>
   .authGate{
@@ -155,6 +173,9 @@
 <button class="btn" id="btnIntrari" onclick="showPage('intrari')">INTRARI_OTEL</button>
 <button class="btn" id="btnDebitate" onclick="showPage('debitate')">DEBITATE</button>
 <div class="right">
+<button class="btn" id="btnCloudDown" onclick="cloudPull()">Cloud ↓</button>
+<button class="btn" id="btnCloudUp" onclick="cloudPush()" title="Necesită rol Editor/Admin">Cloud ↑</button>
+<span class="syncpill" id="syncPill" style="display:none">Cloud: —</span>
 <button class="btn" id="btnBackupAll" onclick="exportAllData()">Backup total</button>
 <button class="btn" id="btnRestoreAll" onclick="triggerImportAll()">Restore total</button>
 <button class="btn" id="btnResetAll" onclick="resetAllData()">Reset total</button>
@@ -5430,6 +5451,7 @@ function goMenu(){
       intrari: "INTRARI_OTEL_autosave_v3",
       debitate: "DEBITATE_autosave_v1"
     };
+    window.APP_KEYS = APP_KEYS;
 
     function setActive(key){
       const map = {
@@ -5601,7 +5623,7 @@ function goMenu(){
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
       <div>
         <h2 class="authTitle">Autentificare</h2>
-        <p class="authHint">Intră cu contul Supabase. <b>Editor</b> poate modifica; <b>Viewer</b> are doar vizualizare (export permis). (Login cerut de fiecare dată când deschizi site-ul.)</p>
+        <p class="authHint">Intră cu contul Supabase. <b>Editor</b> poate modifica; <b>Viewer</b> are doar vizualizare (export permis). (Rămâi logat pe acest PC.)</p>
       </div>
       <div id="roleBadge" style="display:none" class="rolePill"><span class="roleDot" id="roleDot"></span><span id="roleText"></span></div>
     </div>
@@ -5643,16 +5665,48 @@ function goMenu(){
   const roleText = document.getElementById('roleText');
   const roleDot  = document.getElementById('roleDot');
 
+  const btnCloudDown = document.getElementById('btnCloudDown');
+  const btnCloudUp   = document.getElementById('btnCloudUp');
+  const syncPill     = document.getElementById('syncPill');
+
   function showErr(msg){ errEl.textContent = msg || ''; }
   function setBusy(b){ btnIn.disabled = b; if(b) showErr(''); }
 
   const supa = (window.supabase && window.supabase.createClient)
-    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } })
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true
+        }
+      })
     : null;
 
   if(!supa){
     showErr('Nu pot încărca supabase-js (CDN blocat). Încearcă refresh.');
     return;
+  }
+
+  // Expose for debugging (optional)
+  window.__SUPA__ = supa;
+
+  let currentUser = null;
+  let currentRole = null;
+
+  function isEditorRole(role){ return role === 'editor' || role === 'admin'; }
+  function isAdminRole(role){ return role === 'admin'; }
+
+  function setSync(text, cls){
+    if(!syncPill) return;
+    syncPill.style.display = 'inline-flex';
+    syncPill.classList.remove('ok','bad');
+    if (cls) syncPill.classList.add(cls);
+    syncPill.textContent = text;
+  }
+
+  function setCloudButtons(){
+    if(btnCloudDown) btnCloudDown.disabled = !currentUser;
+    if(btnCloudUp) btnCloudUp.disabled = !(currentUser && isEditorRole(currentRole));
   }
 
   async function loadRole(user){
@@ -5673,44 +5727,164 @@ function goMenu(){
     window.__APP_ROLE__ = role;
   }
 
-  async function refreshSession(){
-    if(window.__AUTH_OK__){
-      gate.style.display='none';
-      btnOut.style.display='inline-block';
+  function hasLocalData(){
+    try{
+      const keys = (window.APP_KEYS && Object.values(window.APP_KEYS)) ? Object.values(window.APP_KEYS) : [];
+      let total = 0;
+      keys.forEach(k => { total += (localStorage.getItem(k) || '').length; });
+      return total > 40; // mic prag: "nu e gol"
+    }catch(_e){ return false; }
+  }
+
+  const DOCS = [
+    { doc_key: 'helpers',   ls_key: (window.APP_KEYS ? window.APP_KEYS.helpers   : 'RF_HELPERS_v1') },
+    { doc_key: 'numeralkod',ls_key: (window.APP_KEYS ? window.APP_KEYS.numeralkod: 'NUMERALKOD_autosave_v1') },
+    { doc_key: 'intrari',   ls_key: (window.APP_KEYS ? window.APP_KEYS.intrari   : 'INTRARI_OTEL_autosave_v3') },
+    { doc_key: 'debitate',  ls_key: (window.APP_KEYS ? window.APP_KEYS.debitate  : 'DEBITATE_autosave_v1') }
+  ];
+
+  async function cloudPull(silent){
+    if(!currentUser){
+      if(!silent) alert('Trebuie să fii autentificat.');
       return;
     }
-    gate.style.display='flex';
-    badge.style.display='none';
-    btnOut.style.display='none';
+    setSync('Cloud: încarc…', '');
+    try{
+      const keys = DOCS.map(d => d.doc_key);
+      const { data, error } = await supa
+        .from('rf_documents')
+        .select('doc_key, data, updated_at')
+        .in('doc_key', keys);
+
+      if(error) throw error;
+
+      const map = new Map((data || []).map(r => [r.doc_key, r]));
+      let applied = 0;
+
+      for (const d of DOCS){
+        const row = map.get(d.doc_key);
+        if(row && row.data != null){
+          localStorage.setItem(d.ls_key, JSON.stringify(row.data));
+          applied++;
+        }
+      }
+
+      setSync(`Cloud ↓ OK (${applied})`, 'ok');
+
+      if(!silent){
+        alert('Date încărcate din cloud în acest browser. Se reîncarcă paginile.');
+      }
+      if (typeof reloadAllPages === 'function') reloadAllPages();
+    }catch(e){
+      console.error(e);
+      setSync('Cloud: eroare la ↓', 'bad');
+      if(!silent) alert('Cloud ↓ error: ' + (e?.message || e));
+    }
+  }
+
+  async function cloudPush(){
+    if(!currentUser) return alert('Trebuie să fii autentificat.');
+    if(!isEditorRole(currentRole)) return alert('Rol Viewer: nu ai drept să urci date în cloud.');
+
+    setSync('Cloud: urc…', '');
+    try{
+      const payload = [];
+      for (const d of DOCS){
+        const obj = (typeof getJsonFromLS === 'function') ? getJsonFromLS(d.ls_key) : null;
+        if(obj == null) continue;
+        payload.push({ doc_key: d.doc_key, data: obj });
+      }
+
+      if(!payload.length){
+        setSync('Cloud: nimic de urcat', 'bad');
+        return alert('Nu am găsit date locale de urcat (localStorage gol).');
+      }
+
+      const { error } = await supa
+        .from('rf_documents')
+        .upsert(payload, { onConflict: 'doc_key' });
+
+      if(error) throw error;
+
+      setSync(`Cloud ↑ OK (${payload.length})`, 'ok');
+      alert('Date urcate în cloud.');
+    }catch(e){
+      console.error(e);
+      setSync('Cloud: eroare la ↑', 'bad');
+      alert('Cloud ↑ error: ' + (e?.message || e));
+    }
+  }
+
+  // expose to onclick handlers
+  window.cloudPull = cloudPull;
+  window.cloudPush = cloudPush;
+
+  async function setAuthed(user){
+    currentUser = user || null;
+
+    if(!currentUser){
+      currentRole = null;
+      window.__APP_ROLE__ = null;
+      gate.style.display = 'flex';
+      badge.style.display = 'none';
+      btnOut.style.display = 'none';
+      setCloudButtons();
+      setSync('Cloud: neconectat', '');
+      return;
+    }
+
+    currentRole = await loadRole(currentUser);
+    applyRole(currentRole);
+
+    gate.style.display = 'none';
+    btnOut.style.display = 'inline-block';
+    setCloudButtons();
+    setSync('Cloud: conectat', '');
+
+    // Auto Cloud Pull doar dacă local e gol (ca să nu-ți suprascrie munca)
+    if(!hasLocalData()){
+      await cloudPull(true);
+    }
   }
 
   btnIn.addEventListener('click', async ()=>{
     setBusy(true);
-    try {
-      const email = (emailEl.value||'').trim();
+    try{
+      const email = (emailEl.value || '').trim();
       const password = passEl.value || '';
-      if(!email || !password){ showErr('Completează email + parola.'); setBusy(false); return; }
+      if(!email || !password){ showErr('Completează email + parola.'); return; }
+
       const { data, error } = await supa.auth.signInWithPassword({ email, password });
       if(error) throw error;
-      const role = await loadRole(data.user);
-      applyRole(role);
-      gate.style.display = 'none';
-      window.__AUTH_OK__ = true;
-    } catch(e){
+
+      await setAuthed(data.user);
+    }catch(e){
       console.error(e);
       showErr(e && e.message ? e.message : 'Login eșuat.');
-    } finally {
+    }finally{
       setBusy(false);
     }
   });
 
   btnOut.addEventListener('click', async ()=>{
     await supa.auth.signOut();
-    location.reload();
+    // onAuthStateChange va actualiza UI
   });
 
-  refreshSession();
-  supa.auth.onAuthStateChange(()=>refreshSession());
+  // init session (persisted)
+  (async ()=>{
+    try{
+      const { data } = await supa.auth.getSession();
+      await setAuthed(data?.session?.user || null);
+    }catch(e){
+      console.warn(e);
+      await setAuthed(null);
+    }
+  })();
+
+  supa.auth.onAuthStateChange(async (_event, session)=>{
+    await setAuthed(session?.user || null);
+  });
 })();
 </script>
 
